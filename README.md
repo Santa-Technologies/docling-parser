@@ -6,52 +6,40 @@ use in distributed production environments.
 
 ## Running
 
-The easiest way to run this project is using docker. There are two image families,
-one for cuda machines and one for cpu:
-
-- Cuda: ghcr.io/aidotse/docling-inference:rev
-- CPU: ghcr.io/aidotse/docling-inference:cpu-rev
+The easiest way to run this project is using docker. The image is optimized for CPU usage:
 
 ```bash
-# Create volumes to not have to download models every time
-docker volume create hf_cache
-docker volume create ocr_cache
-
-# Run the container
 docker run -d \
-  --gpus all \
   -p 8080:8080 \
   -e NUM_WORKERS=8 \
-  -v hf_cache:/root/.cache/huggingface \
-  -v ocr_cache:/root/.EasyOCR \
   ghcr.io/aidotse/docling-inference:latest
 ```
 
-### Docker compose
+### Google Cloud Platform Deployment
 
-```yaml
-services:
-  docling-inference:
-    image: ghcr.io/aidotse/docling-inference:latest
-    ports:
-      - 8080:8080
-    environment:
-      - NUM_WORKERS=8
-    volumes:
-      - hf_cache:/root/.cache/huggingface
-      - ocr_cache:/root/.EasyOCR
-    restart: always
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+1. Create a Cloud Storage bucket for model caching:
 
-volumes:
-  hf_cache:
-  ocr_cache:
+```bash
+gsutil mb gs://your-bucket-name
+```
+
+2. Build and push the image:
+
+```bash
+docker build -f Dockerfile.cpu -t gcr.io/your-project/docling-inference:latest .
+docker push gcr.io/your-project/docling-inference:latest
+```
+
+3. Deploy to Cloud Run:
+
+```bash
+gcloud run deploy docling-inference \
+  --image gcr.io/your-project/docling-inference:latest \
+  --platform managed \
+  --region your-region \
+  --allow-unauthenticated \
+  --memory 4Gi \
+  --set-env-vars "CACHE_BUCKET=your-bucket-name"
 ```
 
 ### Local python
@@ -65,8 +53,6 @@ uv venv
 
 # Install the dependencies
 uv sync --extra cpu
-# OR if you have cuda devices
-uv sync --extra cu121
 
 # Activate the shell
 source .venv/bin/activate
@@ -115,10 +101,11 @@ For a full list of available options, please refer to the interactive documentat
 
 ## Building
 
-Build the project docker image with one of the following commands
+Build the project docker image with:
 
-- Cuda: `docker build -t ghcr.io/aidotse/docling-inference:dev .`
-- CPU: `docker build -f Dockerfile.cpu -t ghcr.io/aidotse/docling-inference:dev .`
+```bash
+docker build -f Dockerfile.cpu -t ghcr.io/aidotse/docling-inference:dev .
+```
 
 ## Configuration
 
@@ -140,3 +127,4 @@ available configuration variables. They are defined in `src/config.py`
 - `DO_FORMULA_ENRICHMENT`: Use a formula enrichment model in the pipeline. Converts formulas to LaTeX.
 - `DO_PICTURE_CLASSIFICATION`: Use a picture classification model in the pipelinese. Classifies the type of image into a category.
 - `DO_PICTURE_DESCRIPTION`: Use a picture description model in the pipeline. Uses a small multimodal model to describe images.
+- `CACHE_BUCKET`: Name of the GCP bucket to use for model caching. If not set, models will be downloaded on each deployment.
