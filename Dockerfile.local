@@ -1,0 +1,46 @@
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project files
+COPY pyproject.toml README.md /app/
+COPY src/ /app/src/
+
+# Create virtual environment and install dependencies
+RUN python -m venv .venv && \
+    . .venv/bin/activate && \
+    pip install -e .[cpu]
+
+# Set environment variables
+ENV PORT=8080
+ENV LOG_LEVEL=DEBUG
+ENV PYTHONPATH=/app
+
+# Create a startup script
+COPY <<EOF /app/start.sh
+#!/bin/bash
+echo "Starting application..."
+echo "Environment variables:"
+env | grep -E "PORT|CACHE|TRANSFORMERS|EASYOCR|LOG|PYTHON"
+echo "Current directory: $(pwd)"
+echo "Contents of /app:"
+ls -la /app
+echo "Python packages:"
+. .venv/bin/activate && pip list
+echo "Starting uvicorn..."
+. .venv/bin/activate && exec uvicorn src.main:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 300 --log-level debug
+EOF
+
+RUN chmod +x /app/start.sh
+
+# Add health check
+HEALTHCHECK --interval=3s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+CMD ["/app/start.sh"]

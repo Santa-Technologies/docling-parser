@@ -1,16 +1,23 @@
-FROM --platform=linux/amd64 python:3.11-slim-bookworm AS builder
+FROM python:3.11-slim-bookworm
+
 WORKDIR /app
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    dos2unix \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml uv.lock /app/
-RUN uv sync --frozen --no-cache --no-install-project --extra cpu
+# Copy project files
+COPY pyproject.toml README.md /app/
+COPY src/ /app/src/
+COPY start.sh /app/start.sh
 
-FROM --platform=linux/amd64 python:3.11-slim-bookworm
-WORKDIR /app
-
-COPY --from=builder /app /app
-COPY src /app/src
+# Create virtual environment and install dependencies
+RUN python -m venv .venv && \
+    . .venv/bin/activate && \
+    pip install -e .[cpu]
 
 # Create cache directories
 RUN mkdir -p /root/.cache/huggingface /root/.EasyOCR
@@ -19,15 +26,17 @@ RUN mkdir -p /root/.cache/huggingface /root/.EasyOCR
 ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
 ENV EASYOCR_CACHE=/root/.EasyOCR
 ENV PORT=8080
+ENV CACHE_BUCKET=docling-models
+ENV AUTH_TOKEN=docling-inference-token
+ENV LOG_LEVEL=DEBUG
+ENV PYTHONPATH=/app
 
-# Install gsutil for bucket sync
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    curl \
-    && curl -sSL https://sdk.cloud.google.com | bash \
-    && rm -rf /var/lib/apt/lists/*
+# Make start script executable and ensure it uses the correct shell
+RUN chmod +x /app/start.sh && \
+    dos2unix /app/start.sh
 
-# Add gcloud to PATH
-ENV PATH="/root/google-cloud-sdk/bin:$PATH"
+# Add health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
-CMD [ "/app/.venv/bin/python", "-m", "src.main" ]
+CMD ["/bin/sh", "/app/start.sh"]

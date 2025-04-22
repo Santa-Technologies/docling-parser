@@ -15,6 +15,7 @@ class Config(BaseSettings):
     do_formula_enrichment: bool = False
     do_picture_classification: bool = False
     do_picture_description: bool = False
+    cache_bucket: str | None = None
 
     def get_num_workers(self) -> int | None:
         if self.num_workers is None:

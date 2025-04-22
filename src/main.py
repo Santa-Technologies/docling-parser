@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import AsyncIterator, Callable
 import logging
+import asyncio
 
 from docling.datamodel.base_models import (
     ConversionStatus,
@@ -10,8 +11,6 @@ from docling.datamodel.base_models import (
     InputFormat,
 )
 from docling.datamodel.document import ConversionResult
-from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.document import DoclingDocument
 from docling_core.types.io import DocumentStream
 from fastapi import (
@@ -25,7 +24,6 @@ from fastapi import (
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import uvicorn
 
-
 from src.models import (
     OutputFormat,
     ParseFileRequest,
@@ -34,51 +32,90 @@ from src.models import (
     ParseUrlRequest,
 )
 from src.config import Config, get_log_config
+from src.model_manager import ModelManager
 
 logger = logging.getLogger(__name__)
 
+# Initialize configuration
+config = Config()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Setup and teardown events of the app"""
-    # Setup
-    config = Config()
-
-    ocr_languages = config.ocr_languages.split(",")
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_options=PdfPipelineOptions(
-                    ocr_options=EasyOcrOptions(lang=ocr_languages),
-                    do_code_enrichment=False,
-                    do_formula_enrichment=False,
-                    do_picture_classification=False,
-                    do_picture_description=False,
-                )
-            )
-        }
-    )
-    for i, format in enumerate(InputFormat):
-        logger.info(f"Initializing {format.value} pipeline {i + 1}/{len(InputFormat)}")
-
-        converter.initialize_pipeline(format)
-
-    app.state.converter = converter
+    """Initialize app state on startup and cleanup on shutdown"""
+    logger.info("Starting application initialization...")
+    app.state.ready = False
     app.state.config = config
 
+    # Start model initialization in background
+    asyncio.create_task(initialize_models())
+
     yield
-    # Teardown
 
+    # Cleanup on shutdown
+    logger.info("Shutting down application...")
+    if hasattr(app.state, "model_manager"):
+        app.state.model_manager = None
+    app.state.ready = False
 
+# Create FastAPI app instance with lifespan
 app = FastAPI(lifespan=lifespan)
 
-bearer_auth = HTTPBearer(auto_error=False)
+async def initialize_models():
+    """Initialize models in background"""
+    try:
+        logger.info("Initializing model manager...")
+        config = app.state.config
 
+        # Initialize model manager with GCP bucket if configured
+        model_manager = ModelManager(cache_bucket=config.cache_bucket)
+
+        # Sync models from bucket if available
+        model_manager.sync_with_bucket()
+
+        # Load OCR models based on configuration
+        if config.ocr_languages:
+            model_manager.load_ocr_models(config.ocr_languages.split(","))
+
+        # Load enrichment models based on configuration
+        if config.do_code_enrichment:
+            model_manager.load_enrichment_models("code")
+        if config.do_formula_enrichment:
+            model_manager.load_enrichment_models("formula")
+        if config.do_picture_classification:
+            model_manager.load_enrichment_models("picture_classification")
+        if config.do_picture_description:
+            model_manager.load_enrichment_models("picture_description")
+
+        app.state.model_manager = model_manager
+        app.state.ready = True
+        logger.info("Model initialization complete")
+    except Exception as e:
+        logger.error(f"Error during model initialization: {e}")
+        raise
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint that responds immediately"""
+    return {"status": "healthy"}
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness check that verifies models are loaded"""
+    if not getattr(app.state, "ready", False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Application is not ready yet"
+        )
+    return {"status": "ready"}
+
+bearer_auth = HTTPBearer(auto_error=False)
 
 async def authorize_header(
     request: Request, bearer: HTTPAuthorizationCredentials | None = Depends(bearer_auth)
 ) -> None:
-    # Do nothing if AUTH_KEY is not set
+    # Do nothing if config is not initialized or AUTH_KEY is not set
+    if not hasattr(request.app.state, "config") or request.app.state.config is None:
+        return
     auth_token: str | None = request.app.state.config.auth_token
     if auth_token is None:
         return
@@ -90,14 +127,12 @@ async def authorize_header(
             detail={"message": "Unauthorized"},
         )
 
-
 @app.exception_handler(Exception)
 async def ingestion_error_handler(_, exc: Exception) -> None:
     detail = {"message": str(exc)}
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail
     )
-
 
 ConvertData = str | Path | DocumentStream
 ConvertFunc = Callable[[ConvertData], ConversionResult]
@@ -106,7 +141,7 @@ ConvertFunc = Callable[[ConvertData], ConversionResult]
 def convert(request: Request) -> ConvertFunc:
     def convert_func(data: ConvertData) -> ConversionResult:
         try:
-            result = request.app.state.converter.convert(data, raises_on_error=False)
+            result = request.app.state.model_manager.converter.convert(data, raises_on_error=False)
             _check_conversion_result(result)
             return result
         except FileNotFoundError as exc:
@@ -162,21 +197,11 @@ def parse_document_stream(
 
 
 def _check_conversion_result(result: ConversionResult) -> None:
-    """Raises HTTPException and logs on error"""
-    if result.status in [ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS]:
-        return
-
-    if result.errors:
-        for error in result.errors:
-            if error.component_type == DoclingComponentType.USER_INPUT:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"message": error.error_message},
-                )
-            logger.error(
-                f"Error in: {error.component_type.name} - {error.error_message}"
-            )
-    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    if result.status != ConversionStatus.SUCCESS:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"message": f"Conversion failed: {result.error_message}"},
+        )
 
 
 def _get_output(document: DoclingDocument, format: OutputFormat) -> str:
