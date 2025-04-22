@@ -1,9 +1,11 @@
 #!/bin/bash
 
-echo "Starting application..."
-echo "Current directory: $(pwd)"
-echo "Environment variables:"
-env | grep -E "PORT|CACHE|TRANSFORMERS|EASYOCR|PYTHON"
+# Install Python dependencies
+pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install --no-cache-dir -e .[cpu]
 
-echo "Starting uvicorn..."
-exec uvicorn src.main:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 300 --log-level debug
+# Convert LOG_LEVEL to lowercase for uvicorn
+LOG_LEVEL_LOWER=$(echo "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')
+
+# Start the application
+uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --log-level ${LOG_LEVEL_LOWER}
