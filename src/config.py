@@ -10,7 +10,7 @@ class Config(BaseSettings):
     dev_mode: bool = False
     port: int = 8080
     auth_token: str | None = None
-    ocr_languages: str = "en,es,fr,de,sv"
+    ocr_languages: str = "de,en,es,fr,sv"
     do_code_enrichment: bool = False
     do_formula_enrichment: bool = False
     do_picture_classification: bool = False

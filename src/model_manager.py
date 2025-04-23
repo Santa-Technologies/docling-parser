@@ -2,10 +2,12 @@ import os
 import shutil
 from pathlib import Path
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions
 from docling.document_converter import DocumentConverter
 from docling.datamodel.base_models import InputFormat
+from google.cloud import storage
+from google.cloud.exceptions import GoogleCloudError
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,16 @@ class ModelManager:
             "picture_classification": False,
             "picture_description": False
         }
+        self.used_models: Dict[str, bool] = {
+            "layout": False,
+            "table": False,
+            "ocr": False,
+            "code": False,
+            "formula": False,
+            "picture_classification": False,
+            "picture_description": False
+        }
+        self.used_languages: List[str] = []
 
         # Set up cache directories
         self.hf_cache = Path(os.getenv("TRANSFORMERS_CACHE", "/root/.cache/huggingface"))
@@ -31,8 +43,53 @@ class ModelManager:
         self.hf_cache.mkdir(parents=True, exist_ok=True)
         self.ocr_cache.mkdir(parents=True, exist_ok=True)
 
+        # Initialize storage client if bucket is configured
+        self.storage_client = storage.Client() if cache_bucket else None
+        self.bucket = self.storage_client.bucket(cache_bucket) if self.storage_client and cache_bucket else None
+
         # Initialize with core models
         self._initialize_core_models()
+
+    def _sync_directory(self, source_prefix: str, destination: Path, download: bool = True):
+        """Sync a directory between GCS bucket and local filesystem"""
+        if not self.bucket:
+            return
+
+        try:
+            if download:
+                # Download from bucket to local
+                blobs = self.bucket.list_blobs(prefix=source_prefix)
+                for blob in blobs:
+                    # Create local path
+                    local_path = destination / blob.name[len(source_prefix):]
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    # Download file
+                    blob.download_to_filename(str(local_path))
+            else:
+                # Upload from local to bucket
+                for local_file in destination.rglob("*"):
+                    if local_file.is_file():
+                        blob_name = f"{source_prefix}{local_file.relative_to(destination)}"
+                        blob = self.bucket.blob(blob_name)
+                        blob.upload_from_filename(str(local_file))
+        except GoogleCloudError as e:
+            logger.error(f"Failed to sync directory: {e}")
+
+    def _copy_matching_files(self, source_prefix: str, destination: Path, pattern: str):
+        """Copy files matching a pattern from GCS bucket to local filesystem"""
+        if not self.bucket:
+            return
+
+        try:
+            blobs = self.bucket.list_blobs(prefix=source_prefix)
+            for blob in blobs:
+                if pattern in blob.name:
+                    local_path = destination / blob.name[len(source_prefix):]
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    blob.download_to_filename(str(local_path))
+        except GoogleCloudError as e:
+            logger.error(f"Failed to copy matching files: {e}")
 
     def _initialize_core_models(self):
         """Initialize core models (layout analysis and table recognition)"""
@@ -62,8 +119,25 @@ class ModelManager:
             return
 
         logger.info(f"Loading OCR models for languages: {languages}")
+
+        # First try to load from bucket cache
+        found_in_cache = False
+        if self.bucket:
+            for lang in languages:
+                self._copy_matching_files("easyocr/", self.ocr_cache, lang)
+                # Check if we found the model in cache
+                if any(self.ocr_cache.glob(f"*{lang}*")):
+                    found_in_cache = True
+                    logger.info(f"Found OCR model for {lang} in cache")
+
+        # If not found in cache, let the converter download from original source
+        if not found_in_cache:
+            logger.info("Models not found in cache, downloading from original source")
+
         self.converter.format_options.ocr_options = EasyOcrOptions(lang=languages)
         self.loaded_models["ocr"] = True
+        self.used_models["ocr"] = True
+        self.used_languages.extend(languages)
         logger.info("OCR models loaded")
 
     def load_enrichment_models(self, model_type: str):
@@ -72,6 +146,20 @@ class ModelManager:
             return
 
         logger.info(f"Loading {model_type} model")
+
+        # First try to load from bucket cache
+        found_in_cache = False
+        if self.bucket:
+            model_prefix = f"{model_type}-model"
+            self._copy_matching_files("huggingface/", self.hf_cache, model_prefix)
+            # Check if we found the model in cache
+            if any(self.hf_cache.glob(f"{model_prefix}*")):
+                found_in_cache = True
+                logger.info(f"Found {model_type} model in cache")
+
+        # If not found in cache, let the converter download from original source
+        if not found_in_cache:
+            logger.info(f"{model_type} model not found in cache, downloading from original source")
 
         if model_type == "code":
             self.converter.format_options.do_code_enrichment = True
@@ -83,6 +171,7 @@ class ModelManager:
             self.converter.format_options.do_picture_description = True
 
         self.loaded_models[model_type] = True
+        self.used_models[model_type] = True
         logger.info(f"{model_type} model loaded")
 
     def unload_model(self, model_type: str):
@@ -106,32 +195,68 @@ class ModelManager:
         self.loaded_models[model_type] = False
         logger.info(f"{model_type} model unloaded")
 
-    def sync_with_bucket(self):
-        """Sync model cache with GCP bucket if configured"""
-        if not self.cache_bucket:
+    def upload_used_models(self):
+        """Upload models that were used during processing"""
+        if not self.bucket:
             return
 
-        logger.info("Syncing model cache with GCP bucket")
+        logger.info("Uploading used models to GCP bucket")
         try:
-            # Sync Hugging Face cache
-            os.system(f"gsutil -m rsync -r gs://{self.cache_bucket}/huggingface {self.hf_cache}")
-            # Sync EasyOCR cache
-            os.system(f"gsutil -m rsync -r gs://{self.cache_bucket}/easyocr {self.ocr_cache}")
-            logger.info("Model cache synced successfully")
-        except Exception as e:
-            logger.error(f"Failed to sync model cache: {e}")
+            # Upload core models if used
+            if self.used_models["layout"] or self.used_models["table"]:
+                for model_dir in self.hf_cache.glob("layout-model*"):
+                    # Upload the entire directory structure
+                    for root, _, files in os.walk(model_dir):
+                        for file in files:
+                            local_path = Path(root) / file
+                            blob_path = f"huggingface/{model_dir.name}/{local_path.relative_to(model_dir)}"
+                            blob = self.bucket.blob(blob_path)
+                            blob.upload_from_filename(str(local_path))
+                for model_dir in self.hf_cache.glob("table-model*"):
+                    # Upload the entire directory structure
+                    for root, _, files in os.walk(model_dir):
+                        for file in files:
+                            local_path = Path(root) / file
+                            blob_path = f"huggingface/{model_dir.name}/{local_path.relative_to(model_dir)}"
+                            blob = self.bucket.blob(blob_path)
+                            blob.upload_from_filename(str(local_path))
 
-    def upload_to_bucket(self):
-        """Upload model cache to GCP bucket if configured"""
-        if not self.cache_bucket:
-            return
+            # Upload OCR models for used languages
+            if self.used_models["ocr"] and self.used_languages:
+                model_dir = self.ocr_cache / "model"
+                if model_dir.exists():
+                    # Upload the entire model directory structure
+                    for root, _, files in os.walk(model_dir):
+                        for file in files:
+                            local_path = Path(root) / file
+                            blob_path = f"easyocr/model/{local_path.relative_to(model_dir)}"
+                            blob = self.bucket.blob(blob_path)
+                            blob.upload_from_filename(str(local_path))
 
-        logger.info("Uploading model cache to GCP bucket")
-        try:
-            # Upload Hugging Face cache
-            os.system(f"gsutil -m rsync -r {self.hf_cache} gs://{self.cache_bucket}/huggingface")
-            # Upload EasyOCR cache
-            os.system(f"gsutil -m rsync -r {self.ocr_cache} gs://{self.cache_bucket}/easyocr")
-            logger.info("Model cache uploaded successfully")
+            # Upload enrichment models if used
+            model_types = [
+                ("code", "code-model"),
+                ("formula", "formula-model"),
+                ("picture_classification", "picture-classification-model"),
+                ("picture_description", "picture-description-model")
+            ]
+
+            for model_type, model_prefix in model_types:
+                if self.used_models[model_type]:
+                    for model_dir in self.hf_cache.glob(f"{model_prefix}*"):
+                        # Upload the entire directory structure
+                        for root, _, files in os.walk(model_dir):
+                            for file in files:
+                                local_path = Path(root) / file
+                                blob_path = f"huggingface/{model_dir.name}/{local_path.relative_to(model_dir)}"
+                                blob = self.bucket.blob(blob_path)
+                                blob.upload_from_filename(str(local_path))
+
+            logger.info("Used models uploaded successfully")
         except Exception as e:
-            logger.error(f"Failed to upload model cache: {e}")
+            logger.error(f"Failed to upload used models: {e}")
+
+    def reset_usage_tracking(self):
+        """Reset the tracking of which models were used"""
+        self.used_models = {k: False for k in self.used_models}
+        self.used_languages = []

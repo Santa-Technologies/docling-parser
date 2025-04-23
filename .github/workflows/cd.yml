@@ -1,0 +1,83 @@
+name: CI/CD for Docling Parser
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'main' || 'dev' }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: "${{ secrets.SECRET_ACCOUNT_KEY }}"
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build and Push Docker Image
+        run: |
+          if [ ${{ github.ref }} = "refs/heads/dev" ]; then
+            prefix="dev"
+            env_name="dev"
+          else
+            prefix="prod"
+            env_name="main"
+          fi
+
+          docker_image="eu.gcr.io/wisebid/docling-inference:${{ github.sha }}"
+
+          # Build the image
+          docker build \
+            -t $docker_image \
+            -f Dockerfile.cpu .
+
+          # Push to Google Container Registry
+          gcloud auth configure-docker
+          docker push $docker_image
+
+      - name: Deploy to Cloud Run
+        run: |
+          if [ ${{ github.ref }} = "refs/heads/dev" ]; then
+            service_name="dev-docling-inference"
+            env_name="dev"
+            vpc_connector="dev-connector"
+            dev_mode="1"
+          else
+            service_name="prod-docling-inference"
+            env_name="main"
+            vpc_connector="prod-connector"
+            dev_mode="0"
+          fi
+
+          gcloud run deploy $service_name \
+            --image eu.gcr.io/wisebid/docling-inference:${{ github.sha }} \
+            --platform managed \
+            --region europe-west3 \
+            --allow-unauthenticated \
+            --vpc-connector $vpc_connector \
+            --service-account wisebid-auth@wisebid.iam.gserviceaccount.com \
+            --set-env-vars "CACHE_BUCKET=docling-models,DEV_MODE=$dev_mode" \
+            --update-labels=env=$env_name,project=docling-inference \
+            --memory 4Gi

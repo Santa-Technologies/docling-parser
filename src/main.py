@@ -7,8 +7,6 @@ import asyncio
 
 from docling.datamodel.base_models import (
     ConversionStatus,
-    DoclingComponentType,
-    InputFormat,
 )
 from docling.datamodel.document import ConversionResult
 from docling_core.types.doc.document import DoclingDocument
@@ -68,9 +66,6 @@ async def initialize_models():
 
         # Initialize model manager with GCP bucket if configured
         model_manager = ModelManager(cache_bucket=config.cache_bucket)
-
-        # Sync models from bucket if available
-        model_manager.sync_with_bucket()
 
         # Load OCR models based on configuration
         if config.ocr_languages:
@@ -165,6 +160,10 @@ def parse_document_url(
 
     json_output = result.document.export_to_dict() if payload.include_json else None
 
+    # Upload any newly downloaded models to the bucket
+    if app.state.config.cache_bucket:
+        _upload_used_models(result)
+
     return ParseResponse(
         message="Document parsed successfully",
         status="Ok",
@@ -189,6 +188,10 @@ def parse_document_stream(
 
     json_output = result.document.export_to_dict() if payload.include_json else None
 
+    # Upload any newly downloaded models to the bucket
+    if app.state.config.cache_bucket:
+        _upload_used_models(result)
+
     return ParseResponse(
         message="Document parsed successfully",
         status="Ok",
@@ -211,6 +214,20 @@ def _get_output(document: DoclingDocument, format: OutputFormat) -> str:
         return document.export_to_text()
     if format == OutputFormat.HTML:
         return document.export_to_html()
+
+
+def _upload_used_models(result: ConversionResult):
+    """Upload models that were used during conversion"""
+    try:
+        model_manager = app.state.model_manager
+        if model_manager and app.state.config.cache_bucket:
+            # Upload any models that were used
+            model_manager.upload_used_models()
+            # Reset usage tracking for next request
+            model_manager.reset_usage_tracking()
+            logger.info("Successfully uploaded used models to bucket")
+    except Exception as e:
+        logger.error(f"Error uploading models after document processing: {e}")
 
 
 if __name__ == "__main__":

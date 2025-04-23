@@ -1,130 +1,159 @@
-# Docling inference server
+# Docling Parser
 
-This project provides a FastAPI wrapper around the
-[docling](https://github.com/DS4SD/docling) document parser to make it easier to
-use in distributed production environments.
+A document parsing service that extracts text, tables, and other elements from various document formats.
 
-## Running
+## Features
 
-The easiest way to run this project is using docker. The image is optimized for CPU usage:
+- Supports multiple input formats (PDF, DOCX, etc.)
+- OCR capabilities with multi-language support
+- Table extraction and recognition
+- Layout analysis
+- Optional enrichment features (code, formulas, picture classification/description)
+
+## Model Management
+
+The service uses a sophisticated model management system that:
+
+1. Automatically downloads models on first use
+2. Caches models in Google Cloud Storage for faster subsequent loads
+3. Only loads models that are needed for the current request
+4. Automatically uploads used models to the cache after processing
+
+### Model Caching Behavior
+
+- Models are downloaded from their original sources on first use
+- After successful processing, used models are automatically uploaded to the configured GCP bucket
+- Subsequent requests will use the cached models from the bucket
+- The system maintains the exact directory structure required by each model library
+
+### Environment Variables
+
+Configure model caching and language support:
 
 ```bash
-docker run -d \
-  -p 8080:8080 \
-  -e NUM_WORKERS=8 \
-  ghcr.io/aidotse/docling-inference:latest
+# GCP bucket for model caching
+CACHE_BUCKET=docling-models
+
+# Prioritize specific languages for OCR (comma-separated)
+OCR_LANGUAGES=de,en
 ```
 
-### Google Cloud Platform Deployment
+## Building and Deployment
 
-1. Create a Cloud Storage bucket for model caching:
+### Local Development
+
+1. Build the Docker image:
 
 ```bash
-gsutil mb gs://your-bucket-name
+docker buildx build --platform linux/amd64 -t eu.gcr.io/wisebid/docling-inference:local -f Dockerfile.cpu .
 ```
 
-2. Build and push the image:
+2. Push the image to Google Container Registry:
 
 ```bash
-docker build -f Dockerfile.cpu -t gcr.io/your-project/docling-inference:latest .
-docker push gcr.io/your-project/docling-inference:latest
+docker push eu.gcr.io/wisebid/docling-inference:local
 ```
 
 3. Deploy to Cloud Run:
 
 ```bash
-gcloud run deploy docling-inference \
-  --image gcr.io/your-project/docling-inference:latest \
+gcloud run deploy docling-inference-dev \
+  --image eu.gcr.io/wisebid/docling-inference:local \
   --platform managed \
-  --region your-region \
+  --region europe-west3 \
   --allow-unauthenticated \
-  --memory 4Gi \
-  --set-env-vars "CACHE_BUCKET=your-bucket-name"
+  --vpc-connector dev-connector \
+  --service-account wisebid-auth@wisebid.iam.gserviceaccount.com \
+  --set-env-vars "DEV_MODE=1,AUTH_TOKEN=dev-key" \
+  --update-labels=env=dev,project=docling-inference \
+  --memory 4Gi
 ```
 
-### Local python
+### Production Deployment
 
-Dependencies are handled with [uv](https://docs.astral.sh/uv/) in this
-project. Follow their installation instructions if you do not have it.
+The service is automatically deployed to production using GitHub Actions when changes are pushed to the main branch.
+
+## API Usage
+
+### Parse Document from URL
 
 ```bash
-# Create a virtual environment
-uv venv
+curl -X POST "https://your-service-url/parse-url" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/document.pdf",
+    "options": {
+      "ocr_languages": ["de", "en"],
+      "do_code_enrichment": true,
+      "do_formula_enrichment": true
+    }
+  }'
+```
 
-# Install the dependencies
-uv sync --extra cpu
+### Parse Document from Stream
 
-# Activate the shell
-source .venv/bin/activate
+```bash
+curl -X POST "https://your-service-url/parse-stream" \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@document.pdf" \
+  -F 'options={"ocr_languages": ["de", "en"], "do_code_enrichment": true}'
+```
 
-# Start the server
+## Response Format
+
+The API returns a JSON response with the following structure:
+
+```json
+{
+  "success": true,
+  "result": {
+    "text": "Extracted text content",
+    "tables": [...],
+    "layout": [...],
+    "code_blocks": [...],
+    "formulas": [...],
+    "pictures": [...]
+  }
+}
+```
+
+## Error Handling
+
+The API returns appropriate HTTP status codes and error messages:
+
+- 400: Invalid input or options
+- 500: Internal server error
+- 503: Service unavailable (e.g., during model loading)
+
+## Development
+
+### Prerequisites
+
+- Python 3.8+
+- Docker
+- Google Cloud SDK
+- Access to Google Cloud Storage bucket for model caching
+
+### Local Setup
+
+1. Clone the repository
+2. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Set up environment variables:
+
+```bash
+export CACHE_BUCKET=docling-models
+export OCR_LANGUAGES=de,en
+```
+
+4. Run the service locally:
+
+```bash
 python src/main.py
 ```
 
-## Using the API
-
-When the server is started you can find the interactive API documentation at the `/docs`
-endpoint. If you're running locally with the example command, this will be
-`http://localhost:8080/docs`.
-
-There are two main methods to parse documents that take the data on two different formats.
-You can use the `/parse/url` to parse a document from a download link. To call it with
-`curl` from the command line:
-
-```sh
-curl -X 'POST' \
-  'http://localhost:8080/parse/url' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "include_json": false,
-  "output_format": "markdown",
-  "url": "https://arxiv.org/pdf/2408.09869"
-}'
-```
-
-You can also parse files directly with the `/parse/file` endpoint:
-
-```sh
-curl -X 'POST' \
-  'http://localhost:8080/parse/file' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: multipart/form-data' \
-  -F 'file=@file-path.pdf;type=application/pdf' \
-  -F 'data={"include_json":false,"output_format":"markdown"}'
-```
-
-Tip: You can use a service like https://curlconverter.com/ to convert curl commands to
-your favourite http client, e.g. `requests`.
-
-For a full list of available options, please refer to the interactive documentation.
-
-## Building
-
-Build the project docker image with:
-
-```bash
-docker build -f Dockerfile.cpu -t ghcr.io/aidotse/docling-inference:dev .
-```
-
-## Configuration
-
-Configuration is handled through environment variables. Here is a list of the
-available configuration variables. They are defined in `src/config.py`
-
-- `NUM_WORKERS`: The number of processes to run.
-- `LOG_LEVEL`: The lowest level of logs to display. One of DEBUG, INFO, WARNING,
-  CRITICAL, ERROR.
-- `DEV_MODE`: Sets automatic reload of the service. Useful during development
-- `PORT`: The port to run the server on.
-- `AUTH_TOKEN`: Token to use for authentication. Token is expected in the
-  `Authorization: Bearer: <token>` format in the request header. The service is
-  unprotected if this option is omitted.
-- `OCR_LANGUAGES`: List of language codes to use for optical character optimization.
-  Default is `"es,en,fr,de,sv"`. See https://www.jaided.ai/easyocr/ for the list
-  of all available languages.
-- `DO_CODE_ENRICHMENT`: Use a code enrichment model in the pipeline. Processes images of code to code.
-- `DO_FORMULA_ENRICHMENT`: Use a formula enrichment model in the pipeline. Converts formulas to LaTeX.
-- `DO_PICTURE_CLASSIFICATION`: Use a picture classification model in the pipelinese. Classifies the type of image into a category.
-- `DO_PICTURE_DESCRIPTION`: Use a picture description model in the pipeline. Uses a small multimodal model to describe images.
-- `CACHE_BUCKET`: Name of the GCP bucket to use for model caching. If not set, models will be downloaded on each deployment.
+## License
