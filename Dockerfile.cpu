@@ -8,6 +8,9 @@ COPY pyproject.toml README.md /app/
 COPY src/ /app/src/
 COPY start.sh /app/start.sh
 
+# Install package and dependencies
+RUN pip install -e .[cpu]
+
 # Create cache directories and set permissions
 RUN mkdir -p /root/.cache/huggingface /root/.EasyOCR && \
     chmod +x /app/start.sh && \

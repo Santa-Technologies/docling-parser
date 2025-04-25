@@ -1,16 +1,14 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
 from io import BytesIO
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, Optional
 import logging
 import asyncio
+import sys
 
-from docling.datamodel.base_models import (
-    ConversionStatus,
-)
-from docling.datamodel.document import ConversionResult
-from docling_core.types.doc.document import DoclingDocument
-from docling_core.types.io import DocumentStream
+from docling.datamodel.base_models import ConversionStatus
+from docling.datamodel.document import ConversionResult, DocumentStream
+from docling.datamodel.document import DoclingDocument
 from fastapi import (
     Depends,
     FastAPI,
@@ -28,14 +26,27 @@ from src.models import (
     ParseResponse,
     ParseResponseData,
     ParseUrlRequest,
+    LoadDocumentResponse,
+    DocumentChunk,
+    ParseAndChunkRequest,
 )
 from src.config import Config, get_log_config
 from src.model_manager import ModelManager
+from src.parser import parse_files
 
 logger = logging.getLogger(__name__)
 
 # Initialize configuration
 config = Config()
+
+# Try to import langchain_docling with error handling
+try:
+    from langchain_docling import DoclingLoader
+    from langchain_docling.loader import ExportType, DoclingDocument
+    LANGCHAIN_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Failed to import langchain_docling: {e}")
+    LANGCHAIN_AVAILABLE = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -199,6 +210,49 @@ def parse_document_stream(
     )
 
 
+@app.post("/parse/parse-and-chunk", response_model=LoadDocumentResponse)
+def parse_and_chunk(
+    payload: ParseAndChunkRequest,
+    _=Depends(authorize_header),
+) -> LoadDocumentResponse:
+    """Handle parsing and chunking of multiple documents.
+
+    This endpoint:
+    - Processes multiple files/URLs in parallel
+    - Extracts text and metadata
+    - Chunks the content
+    - Removes repetitions, page numbers, and whitespace
+    """
+    if not LANGCHAIN_AVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Langchain docling module is not available. Please check the installation.",
+        )
+
+    try:
+        # Use the parse_files function from parser.py
+        docs = parse_files(payload.files)
+
+        chunks = []
+        for doc in docs:
+            chunks.append(DocumentChunk(
+                page_content=doc.page_content,
+                metadata=doc.metadata
+            ))
+
+        if app.state.config.cache_bucket:
+            _upload_used_models(docs[0].metadata.get("conversion_result"))
+
+        return LoadDocumentResponse(chunks=chunks)
+
+    except Exception as e:
+        logger.error(f"Error parsing and chunking documents: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
 def _check_conversion_result(result: ConversionResult) -> None:
     if result.status != ConversionStatus.SUCCESS:
         raise HTTPException(
@@ -230,13 +284,22 @@ def _upload_used_models(result: ConversionResult):
         logger.error(f"Error uploading models after document processing: {e}")
 
 
+class IsTrailing:
+    def __init__(self, value: Optional[bool] = None):
+        self.value = value
+
+
 if __name__ == "__main__":
-    config = Config()
-    uvicorn.run(
-        "src.main:app",
-        host="0.0.0.0",
-        port=config.port,
-        log_config=get_log_config(config.log_level),
-        reload=config.dev_mode,
-        workers=config.get_num_workers(),
-    )
+    try:
+        config = Config()
+        uvicorn.run(
+            "src.main:app",
+            host="0.0.0.0",
+            port=config.port,
+            log_config=get_log_config(config.log_level),
+            reload=config.dev_mode,
+            workers=config.get_num_workers(),
+        )
+    except Exception as e:
+        logger.error(f"Application failed to start: {e}")
+        sys.exit(1)
