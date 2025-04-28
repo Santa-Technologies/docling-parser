@@ -10,7 +10,7 @@ COPY pyproject.toml uv.lock /app/
 # Create a virtual environment and install dependencies into it
 RUN python -m venv /app/.venv && \
     /app/.venv/bin/pip install --upgrade pip && \
-    uv sync --frozen --no-cache --no-install-project --extra cpu
+    uv sync --frozen --no-cache --extra cpu
 
 # --- Runtime Image ---
 FROM python:3.11-slim-bookworm
