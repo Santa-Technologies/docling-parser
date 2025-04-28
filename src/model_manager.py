@@ -8,6 +8,7 @@ from docling.document_converter import DocumentConverter
 from docling.datamodel.base_models import InputFormat
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,9 @@ class ModelManager:
 
         # Initialize with core models
         self._initialize_core_models()
+
+        # Initialize a lock for thread safety
+        self.lock = threading.Lock()
 
     def _sync_directory(self, source_prefix: str, destination: Path, download: bool = True):
         """Sync a directory between GCS bucket and local filesystem"""
@@ -95,23 +99,25 @@ class ModelManager:
         """Initialize core models (layout analysis and table recognition)"""
         logger.info("Initializing core models")
 
-        # Initialize converter first
-        self.converter = DocumentConverter()
+        # Use lock to ensure thread safety during initialization
+        with self.lock:
+            # Initialize converter first
+            self.converter = DocumentConverter()
 
-        # Set default pipeline options
-        format_options = PdfPipelineOptions(
-            ocr_options=EasyOcrOptions(lang=["en"]),  # Minimal OCR setup
-            do_code_enrichment=False,
-            do_formula_enrichment=False,
-            do_picture_classification=False,
-            do_picture_description=False,
-        )
+            # Set default pipeline options
+            format_options = PdfPipelineOptions(
+                ocr_options=EasyOcrOptions(lang=["en"]),  # Minimal OCR setup
+                do_code_enrichment=False,
+                do_formula_enrichment=False,
+                do_picture_classification=False,
+                do_picture_description=False,
+            )
 
-        # Set options after initialization
-        self.converter.format_options = format_options
-        self.loaded_models["layout"] = True
-        self.loaded_models["table"] = True
-        logger.info("Core models initialized")
+            # Set options after initialization
+            self.converter.format_options = format_options
+            self.loaded_models["layout"] = True
+            self.loaded_models["table"] = True
+            logger.info("Core models initialized")
 
     def load_ocr_models(self, languages: list[str]):
         """Load OCR models for specified languages"""
@@ -120,25 +126,27 @@ class ModelManager:
 
         logger.info(f"Loading OCR models for languages: {languages}")
 
-        # First try to load from bucket cache
-        found_in_cache = False
-        if self.bucket:
-            for lang in languages:
-                self._copy_matching_files("easyocr/", self.ocr_cache, lang)
-                # Check if we found the model in cache
-                if any(self.ocr_cache.glob(f"*{lang}*")):
-                    found_in_cache = True
-                    logger.info(f"Found OCR model for {lang} in cache")
+        # Use lock to ensure thread safety during model loading
+        with self.lock:
+            # First try to load from bucket cache
+            found_in_cache = False
+            if self.bucket:
+                for lang in languages:
+                    self._copy_matching_files("easyocr/", self.ocr_cache, lang)
+                    # Check if we found the model in cache
+                    if any(self.ocr_cache.glob(f"*{lang}*")):
+                        found_in_cache = True
+                        logger.info(f"Found OCR model for {lang} in cache")
 
-        # If not found in cache, let the converter download from original source
-        if not found_in_cache:
-            logger.info("Models not found in cache, downloading from original source")
+            # If not found in cache, let the converter download from original source
+            if not found_in_cache:
+                logger.info("Models not found in cache, downloading from original source")
 
-        self.converter.format_options.ocr_options = EasyOcrOptions(lang=languages)
-        self.loaded_models["ocr"] = True
-        self.used_models["ocr"] = True
-        self.used_languages.extend(languages)
-        logger.info("OCR models loaded")
+            self.converter.format_options.ocr_options = EasyOcrOptions(lang=languages)
+            self.loaded_models["ocr"] = True
+            self.used_models["ocr"] = True
+            self.used_languages.extend(languages)
+            logger.info("OCR models loaded")
 
     def load_enrichment_models(self, model_type: str):
         """Load specific enrichment models on demand"""
@@ -147,32 +155,34 @@ class ModelManager:
 
         logger.info(f"Loading {model_type} model")
 
-        # First try to load from bucket cache
-        found_in_cache = False
-        if self.bucket:
-            model_prefix = f"{model_type}-model"
-            self._copy_matching_files("huggingface/", self.hf_cache, model_prefix)
-            # Check if we found the model in cache
-            if any(self.hf_cache.glob(f"{model_prefix}*")):
-                found_in_cache = True
-                logger.info(f"Found {model_type} model in cache")
+        # Use lock to ensure thread safety during model loading
+        with self.lock:
+            # First try to load from bucket cache
+            found_in_cache = False
+            if self.bucket:
+                model_prefix = f"{model_type}-model"
+                self._copy_matching_files("huggingface/", self.hf_cache, model_prefix)
+                # Check if we found the model in cache
+                if any(self.hf_cache.glob(f"{model_prefix}*")):
+                    found_in_cache = True
+                    logger.info(f"Found {model_type} model in cache")
 
-        # If not found in cache, let the converter download from original source
-        if not found_in_cache:
-            logger.info(f"{model_type} model not found in cache, downloading from original source")
+            # If not found in cache, let the converter download from original source
+            if not found_in_cache:
+                logger.info(f"{model_type} model not found in cache, downloading from original source")
 
-        if model_type == "code":
-            self.converter.format_options.do_code_enrichment = True
-        elif model_type == "formula":
-            self.converter.format_options.do_formula_enrichment = True
-        elif model_type == "picture_classification":
-            self.converter.format_options.do_picture_classification = True
-        elif model_type == "picture_description":
-            self.converter.format_options.do_picture_description = True
+            if model_type == "code":
+                self.converter.format_options.do_code_enrichment = True
+            elif model_type == "formula":
+                self.converter.format_options.do_formula_enrichment = True
+            elif model_type == "picture_classification":
+                self.converter.format_options.do_picture_classification = True
+            elif model_type == "picture_description":
+                self.converter.format_options.do_picture_description = True
 
-        self.loaded_models[model_type] = True
-        self.used_models[model_type] = True
-        logger.info(f"{model_type} model loaded")
+            self.loaded_models[model_type] = True
+            self.used_models[model_type] = True
+            logger.info(f"{model_type} model loaded")
 
     def unload_model(self, model_type: str):
         """Unload a specific model to free up memory"""
