@@ -40,35 +40,6 @@ OCR_LANGUAGES=de,en
 
 ## Building and Deployment
 
-### Local Development
-
-1. Build the Docker image:
-
-```bash
-docker buildx build --platform linux/amd64 -t eu.gcr.io/wisebid/docling-inference:local -f Dockerfile.cpu .
-```
-
-2. Push the image to Google Container Registry:
-
-```bash
-docker push eu.gcr.io/wisebid/docling-inference:local
-```
-
-3. Deploy to Cloud Run:
-
-```bash
-gcloud run deploy docling-inference-dev \
-  --image eu.gcr.io/wisebid/docling-inference:local \
-  --platform managed \
-  --region europe-west3 \
-  --allow-unauthenticated \
-  --vpc-connector dev-connector \
-  --service-account wisebid-auth@wisebid.iam.gserviceaccount.com \
-  --set-env-vars "DEV_MODE=1,AUTH_TOKEN=dev-key" \
-  --update-labels=env=dev,project=docling-inference \
-  --memory 4Gi
-```
-
 ### Production Deployment
 
 The service is automatically deployed to production using GitHub Actions when changes are pushed to the main branch.
