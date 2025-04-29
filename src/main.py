@@ -28,7 +28,7 @@ from src.models import (
     ParseUrlRequest,
     LoadDocumentResponse,
     DocumentChunk,
-    ParseAndChunkRequest,
+    ChunkUrlRequest,
 )
 from src.config import Config, get_log_config
 from src.model_manager import ModelManager
@@ -210,15 +210,15 @@ def parse_document_stream(
     )
 
 
-@app.post("/parse/parse-and-chunk", response_model=LoadDocumentResponse)
-def parse_and_chunk(
-    payload: ParseAndChunkRequest,
+@app.post("/chunk/url", response_model=LoadDocumentResponse)
+def chunk_document_url(
+    payload: ChunkUrlRequest,
     _=Depends(authorize_header),
 ) -> LoadDocumentResponse:
-    """Handle parsing and chunking of multiple documents.
+    """Handle chunking of a single document URL.
 
     This endpoint:
-    - Processes multiple files/URLs in parallel
+    - Processes a single document URL
     - Extracts text and metadata
     - Chunks the content
     - Removes repetitions, page numbers, and whitespace
@@ -230,8 +230,8 @@ def parse_and_chunk(
         )
 
     try:
-        # Use the parse_files function from parser.py
-        docs = parse_files(payload.files)
+        # Use the parse_files function from parser.py with the single URL
+        docs = parse_files([payload.url])
 
         chunks = []
         for doc in docs:
@@ -246,7 +246,7 @@ def parse_and_chunk(
         return LoadDocumentResponse(chunks=chunks)
 
     except Exception as e:
-        logger.error(f"Error parsing and chunking documents: {e}")
+        logger.error(f"Error chunking document: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),

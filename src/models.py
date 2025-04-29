@@ -87,14 +87,10 @@ class LoadDocumentResponse(BaseModel):
     message: str = "Document loaded successfully"
 
 
-class ParseAndChunkRequest(BaseModel):
-    """Request model for parsing and chunking multiple documents."""
-    files: List[str] = Field(
+class ChunkUrlRequest(BaseModel):
+    """Request model for chunking a single document URL."""
+    url: str = Field(
         ...,
-        description="List of file paths or URLs to process",
-        examples=[["https://example.com/doc1.pdf", "https://example.com/doc2.pdf"]]
-    )
-    chunker_kwargs: Optional[Dict[str, Any]] = Field(
-        default_factory=lambda: {"tokenizer": "sentence-transformers/all-MiniLM-L6-v2"},
-        description="Optional arguments for the chunker"
+        description="URL of the document to process",
+        examples=["https://example.com/document.pdf"]
     )
