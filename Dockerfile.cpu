@@ -1,23 +1,22 @@
-# Use Python slim image
-FROM python:3.11-slim-bullseye
-
+FROM python:3.11-slim-bookworm AS builder
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml README.md /app/
-COPY src/ /app/src/
-COPY start.sh /app/start.sh
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install package and dependencies
-RUN pip install -e .[cpu]
+COPY pyproject.toml uv.lock /app/
+RUN uv sync --frozen --no-cache --no-install-project --extra cpu \
+    && uv pip install "google-cloud-storage>=2.14.0"
 
-# Create cache directories and set permissions
-RUN mkdir -p /root/.cache/huggingface /root/.EasyOCR && \
-    chmod +x /app/start.sh && \
-    # Ensure line endings are correct
-    sed -i 's/\r$//' /app/start.sh
+FROM python:3.11-slim-bookworm
+WORKDIR /app
 
-# Set environment variables
+COPY --from=builder /app /app
+COPY src /app/src
+
+# Create Huggingface and EasyOCR cache folders
+RUN mkdir -p /root/.cache/huggingface /root/.EasyOCR
+
+# Environment variables
 ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
 ENV EASYOCR_CACHE=/root/.EasyOCR
 ENV PORT=8080
@@ -25,4 +24,5 @@ ENV CACHE_BUCKET=docling-models
 ENV LOG_LEVEL=DEBUG
 ENV PYTHONPATH=/app
 
-CMD ["/bin/bash", "/app/start.sh"]
+# Activate virtual environment and run the app
+CMD [ "/app/.venv/bin/python", "-m", "src.main" ]
