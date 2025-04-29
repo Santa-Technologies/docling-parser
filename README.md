@@ -75,6 +75,68 @@ The service is automatically deployed to production using GitHub Actions when ch
 
 ## API Usage
 
+### Load and Chunk Document
+
+This endpoint implements the DoclingLoader functionality, allowing you to load and chunk documents from either a local file path or a URL:
+
+```bash
+# Using a URL
+curl -X POST "https://your-service-url/load-document" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "https://example.com/document.pdf",
+    "export_type": "DOC_CHUNKS",
+    "chunker_kwargs": {
+      "chunk_size": 1000,
+      "chunk_overlap": 200
+    },
+    "pipeline_options": {
+      "extract_text": true,
+      "extract_images": true,
+      "extract_tables": true,
+      "ocr_options": {
+        "lang": ["de", "en"]
+      }
+    }
+  }'
+
+# Using a local file path
+curl -X POST "https://your-service-url/load-document" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "/path/to/document.pdf",
+    "export_type": "DOC_CHUNKS",
+    "chunker_kwargs": {
+      "chunk_size": 1000,
+      "chunk_overlap": 200
+    },
+    "pipeline_options": {
+      "extract_text": true,
+      "extract_images": true,
+      "extract_tables": true
+    }
+  }'
+```
+
+Response format:
+
+```json
+{
+  "chunks": [
+    {
+      "page_content": "Chunk content...",
+      "metadata": {
+        "headings": [...],
+        "captions": [...],
+        "origin": "..."
+      }
+    }
+  ],
+  "status": "success",
+  "message": "Document loaded successfully"
+}
+```
+
 ### Parse Document from URL
 
 ```bash

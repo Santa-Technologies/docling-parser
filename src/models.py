@@ -1,7 +1,8 @@
 from enum import StrEnum, auto
-from typing import Any
+from typing import Any, List, Optional, Dict
 from fastapi import Form
 from pydantic import BaseModel, ConfigDict, Field
+from langchain_docling.loader import ExportType
 
 
 class BaseRequest(BaseModel):
@@ -49,3 +50,51 @@ class ParseResponseData(BaseModel):
 
 class ParseResponse(BaseResponse):
     data: ParseResponseData
+
+
+class LoadDocumentRequest(BaseModel):
+    file_paths: List[str] = Field(
+        ...,
+        description="List of paths to document files or URLs",
+        examples=[["https://example.com/doc1.pdf", "https://example.com/doc2.pdf"]]
+    )
+    export_type: ExportType = Field(
+        ExportType.DOC_CHUNKS,
+        description="Type of export to perform",
+        examples=["doc_chunks"]
+    )
+    chunker_kwargs: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"tokenizer": "sentence-transformers/all-MiniLM-L6-v2"},
+        description="Optional arguments for the chunker"
+    )
+    md_export_kwargs: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Optional arguments for markdown export",
+        examples=[{"include_metadata": True}]
+    )
+
+
+class DocumentChunk(BaseModel):
+    """A chunk of a document with its content and metadata."""
+    page_content: str
+    metadata: Dict[str, Any]
+
+
+class LoadDocumentResponse(BaseModel):
+    """Response containing processed document chunks."""
+    chunks: List[DocumentChunk]
+    status: str = "success"
+    message: str = "Document loaded successfully"
+
+
+class ParseAndChunkRequest(BaseModel):
+    """Request model for parsing and chunking multiple documents."""
+    files: List[str] = Field(
+        ...,
+        description="List of file paths or URLs to process",
+        examples=[["https://example.com/doc1.pdf", "https://example.com/doc2.pdf"]]
+    )
+    chunker_kwargs: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"tokenizer": "sentence-transformers/all-MiniLM-L6-v2"},
+        description="Optional arguments for the chunker"
+    )

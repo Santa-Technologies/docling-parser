@@ -5,7 +5,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 COPY pyproject.toml uv.lock /app/
 RUN uv sync --frozen --no-cache --no-install-project --extra cpu \
-    && uv pip install "google-cloud-storage>=2.14.0"
+    && uv pip install "google-cloud-storage>=2.14.0" \
+    && uv pip install "langchain-docling==0.2.0"
 
 FROM python:3.11-slim-bookworm
 WORKDIR /app
@@ -21,7 +22,6 @@ ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
 ENV EASYOCR_CACHE=/root/.EasyOCR
 ENV PORT=8080
 ENV CACHE_BUCKET=docling-models
-ENV LOG_LEVEL=DEBUG
 ENV PYTHONPATH=/app
 
 # Activate virtual environment and run the app
