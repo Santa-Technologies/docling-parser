@@ -35,6 +35,9 @@ class ModelManager:
             "picture_description": False
         }
         self.used_languages: List[str] = []
+        
+        # Initialize a lock for thread safety
+        self.lock = threading.Lock()
 
         # Set up cache directories
         self.hf_cache = Path(os.getenv("TRANSFORMERS_CACHE", "/root/.cache/huggingface"))
@@ -51,8 +54,6 @@ class ModelManager:
         # Initialize with core models
         self._initialize_core_models()
 
-        # Initialize a lock for thread safety
-        self.lock = threading.Lock()
 
     def _sync_directory(self, source_prefix: str, destination: Path, download: bool = True):
         """Sync a directory between GCS bucket and local filesystem"""
